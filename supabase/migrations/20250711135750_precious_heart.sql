@@ -111,3 +111,11 @@ $$ LANGUAGE plpgsql;
 CREATE INDEX IF NOT EXISTS idx_profiles_last_activity ON profiles(last_activity);
 CREATE INDEX IF NOT EXISTS idx_profiles_streak ON profiles(streak);
 CREATE INDEX IF NOT EXISTS idx_profiles_xp ON profiles(xp);
+
+-- Create lessons table for shared AI-generated lessons
+CREATE TABLE IF NOT EXISTS public.lessons (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    title text NOT NULL,
+    content jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT timezone('utc', now())
+);

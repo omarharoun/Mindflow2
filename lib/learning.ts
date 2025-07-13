@@ -14,7 +14,9 @@ export interface LearningService {
   getAchievements(userId: string): Promise<AchievementRow[]>;
   awardXP(userId: string, amount: number): Promise<{ success: boolean; error?: string }>;
   removeLessonProgress(userId: string, topic: string): Promise<{ success: boolean; error?: string }>;
-  removeTopicProgress(userId: string, topic: string): Promise<{ success: boolean; error?: string }>;
+  removeTopicProgress(userId: string, topic: string, deleted: boolean): Promise<{ success: boolean; error?: string }>;
+  getLesson(lessonId: string): Promise<any | null>;
+  saveLesson(lessonId: string, title: string, content: any): Promise<{ success: boolean; error?: string }>;
 }
 
 class LearningServiceImpl implements LearningService {
@@ -71,25 +73,43 @@ class LearningServiceImpl implements LearningService {
     }
   }
 
-  async generateLearningPath(topic: string): Promise<string[]> {
+  async generateLearningPath(topic: string, setDebugInfo?: (info: {error?: string, aiResponse?: string}) => void): Promise<string[]> {
     try {
-      // For now, return predefined paths. In production, use OpenRouter API
-      const basePaths = [
+      const aiPrompt = `Generate a creative, logical learning path for the topic: "${topic}". Return a JSON array of 5-7 unique, engaging lesson titles. Example: [\"Lesson 1 title\", \"Lesson 2 title\", ...]`;
+      const aiResponse = await openRouterAPI.generateResponse([
+        { role: 'user', content: aiPrompt }
+      ]);
+      if (setDebugInfo) setDebugInfo({ aiResponse });
+      let titles: string[] = [];
+      try {
+        const parsed = JSON.parse(aiResponse);
+        if (Array.isArray(parsed) && parsed.every(t => typeof t === 'string')) {
+          titles = parsed;
+        } else if (parsed.path && Array.isArray(parsed.path)) {
+          titles = parsed.path;
+        } else {
+          throw new Error('AI did not return a valid array of titles');
+        }
+      } catch (err) {
+        if (setDebugInfo) setDebugInfo({ error: String(err), aiResponse });
+        // fallback
+        titles = [
+          `Introduction to ${topic}`,
+          `Core Concepts of ${topic}`,
+          `Applications of ${topic}`,
+          `Challenges in ${topic}`,
+          `Future of ${topic}`
+        ];
+      }
+      return titles;
+    } catch (error) {
+      if (setDebugInfo) setDebugInfo({ error: String(error) });
+      return [
         `Introduction to ${topic}`,
         `Core Concepts of ${topic}`,
-        `Practical Applications of ${topic}`,
-        `Advanced ${topic} Techniques`,
-        `${topic} Best Practices`
-      ];
-      return basePaths;
-    } catch (error) {
-      console.error('Generate learning path error:', error);
-      return [
-        'Start with fundamentals',
-        'Practice basic concepts',
-        'Work on intermediate topics',
-        'Apply knowledge in projects',
-        'Review and reinforce learning'
+        `Applications of ${topic}`,
+        `Challenges in ${topic}`,
+        `Future of ${topic}`
       ];
     }
   }
@@ -223,14 +243,17 @@ class LearningServiceImpl implements LearningService {
 
   async removeLessonProgress(userId: string, topic: string): Promise<{ success: boolean; error?: string }> {
     try {
+      console.log('[removeLessonProgress] userId:', userId, 'topic:', topic);
       const { error } = await supabase
         .from('learning_progress')
         .delete()
         .eq('user_id', userId)
         .eq('topic', topic);
       if (error) {
+        console.error('[removeLessonProgress] error:', error);
         return { success: false, error: error.message };
       }
+      console.log('[removeLessonProgress] success');
       return { success: true };
     } catch (error) {
       console.error('Remove lesson progress error:', error);
@@ -238,20 +261,63 @@ class LearningServiceImpl implements LearningService {
     }
   }
 
-  async removeTopicProgress(userId: string, topic: string): Promise<{ success: boolean; error?: string }> {
+  async removeTopicProgress(userId: string, topic: string, deleted: boolean): Promise<{ success: boolean; error?: string }> {
     try {
+      console.log('[removeTopicProgress] userId:', userId, 'topic:', topic, 'deleted:', deleted);
+      // Soft delete or restore: update the deleted flag
       const { error } = await supabase
         .from('learning_progress')
-        .delete()
+        .update({ deleted })
         .eq('user_id', userId)
-        .ilike('topic', `${topic}:%`);
+        .or(`topic.ilike.${topic}:% , topic.eq.${topic}`);
+      if (error) {
+        console.error('[removeTopicProgress] error:', error);
+        return { success: false, error: error.message };
+      }
+      console.log('[removeTopicProgress] success');
+      return { success: true };
+    } catch (error) {
+      console.error('Remove topic progress error:', error);
+      return { success: false, error: 'Failed to update topic deleted flag' };
+    }
+  }
+
+  // Fetch a shared lesson by lessonId
+  async getLesson(lessonId: string): Promise<any | null> {
+    try {
+      const { data, error } = await supabase
+        .from('lessons')
+        .select('*')
+        .eq('id', lessonId)
+        .single();
+      if (error || !data) {
+        return null;
+      }
+      return data.content;
+    } catch (error) {
+      console.error('Get lesson error:', error);
+      return null;
+    }
+  }
+
+  // Save a shared lesson (overwrites if exists)
+  async saveLesson(lessonId: string, title: string, content: any): Promise<{ success: boolean; error?: string }> {
+    try {
+      const { error } = await supabase
+        .from('lessons')
+        .upsert({
+          id: lessonId,
+          title,
+          content,
+          created_at: new Date().toISOString(),
+        }, { onConflict: 'id' });
       if (error) {
         return { success: false, error: error.message };
       }
       return { success: true };
     } catch (error) {
-      console.error('Remove topic progress error:', error);
-      return { success: false, error: 'Failed to remove topic progress' };
+      console.error('Save lesson error:', error);
+      return { success: false, error: 'Failed to save lesson' };
     }
   }
 }

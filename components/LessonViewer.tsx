@@ -13,13 +13,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { X, ChevronLeft, ChevronRight, CircleCheck as CheckCircle, Circle, Play, Pause, RotateCcw } from 'lucide-react-native';
 import { authManager } from '@/lib/auth';
 import { learningService } from '@/lib/learning';
+import { openRouterAPI } from '@/lib/openrouter';
 
 interface LessonSegment {
   id: string;
   title: string;
   content: string;
   keyPoints: string[];
-  example: string;
   question: {
     text: string;
     options: string[];
@@ -36,15 +36,26 @@ interface LessonViewerProps {
   lessonId: string;
 }
 
+// Utility to split text into boxes of up to 144 words
+function splitIntoBoxes(text: string, maxWords = 144, maxBoxes = 5): string[] {
+  const words = text.split(/\s+/);
+  const boxes = [];
+  for (let i = 0; i < words.length && boxes.length < maxBoxes; i += maxWords) {
+    boxes.push(words.slice(i, i + maxWords).join(' '));
+  }
+  return boxes;
+}
+
 export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId }: LessonViewerProps) {
   const [segments, setSegments] = useState<LessonSegment[]>([]);
   const [currentSegment, setCurrentSegment] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [showQuestion, setShowQuestion] = useState(false);
   const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
   const [showExplanation, setShowExplanation] = useState(false);
   const [attempts, setAttempts] = useState(0);
   const [user, setUser] = useState(authManager.getUser());
+  const [startTime, setStartTime] = useState<Date | null>(null);
+  const [debugInfo, setDebugInfo] = useState<{error?: string, aiResponse?: string}>({});
 
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setUser);
@@ -59,88 +70,110 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
 
   const generateLessonContent = async () => {
     setLoading(true);
+    setDebugInfo({});
     try {
-      // Simulate AI-generated lesson content
-      // In a real app, this would call OpenRouter API
-      const mockSegments: LessonSegment[] = [
+      // 1. Try to fetch the lesson from the database
+      const dbLesson = await learningService.getLesson(lessonId);
+      if (dbLesson && Array.isArray(dbLesson)) {
+        setSegments(dbLesson);
+        setStartTime(new Date());
+        setLoading(false);
+        return;
+      }
+      // 2. If not found, generate with AI
+      const aiPrompt = `Create a detailed, multi-section lesson for the topic: "${lessonTitle}". \nReturn a JSON array where each item is an object with:\n- id (string, unique for each segment)\n- title (string, section title)\n- content (string, main explanation)\n- keyPoints (array of 3-5 bullet points)\n- question (object with: text, options (array), correctAnswer (index), explanation)\n- completed (boolean, default false)\nExample:\n[\n  {\"id\": \"1\", \"title\": \"Intro\", \"content\": \"...\", \"keyPoints\": [\"...\"], \"question\": {\"text\": \"...\", \"options\": [\"...\"], \"correctAnswer\": 0, \"explanation\": \"...\"}, \"completed\": false},\n  ...\n]\nKeep the lesson practical, clear, and engaging.`;
+      let aiResponse = '';
+      let segments: LessonSegment[] = [];
+      try {
+        aiResponse = await openRouterAPI.generateResponse([
+          { role: 'user', content: aiPrompt }
+        ]);
+        setDebugInfo({ aiResponse });
+        let parsed;
+        try {
+          parsed = JSON.parse(aiResponse);
+        } catch (err) {
+          // Try to recover the largest valid JSON array from a truncated response
+          const arrayMatch = aiResponse.match(/\[([\s\S]*)\]/);
+          if (arrayMatch) {
+            const partial = '[' + arrayMatch[1];
+            try {
+              parsed = JSON.parse(partial + ']');
+            } catch (e2) {
+              throw new Error('AI response is not valid JSON, even after recovery.');
+            }
+          } else {
+            throw new Error('AI response is not valid JSON and no array found.');
+          }
+        }
+        if (Array.isArray(parsed)) {
+          segments = parsed;
+        } else if (parsed.lesson && Array.isArray(parsed.lesson)) {
+          segments = parsed.lesson;
+        } else {
+          throw new Error('AI did not return a lesson array');
+        }
+      } catch (err) {
+        setDebugInfo({ error: String(err), aiResponse });
+        setSegments([
+          {
+            id: '1',
+            title: 'Lesson Not Found',
+            content: 'AI failed to generate lesson content. Please try again later or contact support.',
+            keyPoints: [],
+            question: {
+              text: 'What should you do if your lesson is not found?',
+              options: [
+                'Wait for content to be added',
+                'Try a different lesson',
+                'Contact support',
+                'All of the above'
+              ],
+              correctAnswer: 3,
+              explanation: 'If a lesson is not found, you can try a different lesson, wait for content to be added, or contact support.',
+            },
+            completed: false
+          }
+        ]);
+        Alert.alert('AI Error', 'Failed to generate or parse lesson content. See debug info below.');
+        setLoading(false);
+        return;
+      }
+      setSegments(segments);
+      try {
+        const saveResult = await learningService.saveLesson(lessonId, lessonTitle, segments);
+        if (!saveResult.success) {
+          setDebugInfo({ error: saveResult.error, aiResponse });
+          Alert.alert('Database Error', 'Failed to save lesson to database. See debug info below.');
+        }
+      } catch (dbErr) {
+        setDebugInfo({ error: String(dbErr), aiResponse });
+        Alert.alert('Database Error', 'Failed to save lesson to database. See debug info below.');
+      }
+      setStartTime(new Date());
+    } catch (error) {
+      setDebugInfo({ error: String(error) });
+      setSegments([
         {
           id: '1',
-          title: 'Introduction to ' + lessonTitle,
-          content: `Welcome to your lesson on ${lessonTitle}! This foundational segment will introduce you to the core concepts and help you understand why this topic is important.\n\nWe'll start with the basics and build your understanding step by step. By the end of this segment, you'll have a solid foundation to build upon.`,
-          keyPoints: [
-            'Understanding the fundamental concepts',
-            'Why this topic matters in real-world applications',
-            'Key terminology and definitions',
-            'Setting the foundation for deeper learning'
-          ],
-          example: `For example, if you're learning about ${lessonTitle}, think about how you encounter this concept in your daily life. This helps make abstract concepts more concrete and memorable.`,
+          title: 'Lesson Not Found',
+          content: 'No lesson content available for this topic yet. Please check back later or select a different lesson.',
+          keyPoints: [],
           question: {
-            text: `What is the most important first step when learning about ${lessonTitle}?`,
+            text: 'What should you do if your lesson is not found?',
             options: [
-              'Memorizing all the technical terms',
-              'Understanding the fundamental concepts and why they matter',
-              'Jumping straight into advanced topics',
-              'Reading everything available on the subject'
+              'Wait for content to be added',
+              'Try a different lesson',
+              'Contact support',
+              'All of the above'
             ],
-            correctAnswer: 1,
-            explanation: 'Building a strong foundation with fundamental concepts is crucial because it provides the framework for understanding more complex ideas later.'
-          },
-          completed: false
-        },
-        {
-          id: '2',
-          title: 'Core Principles',
-          content: `Now that you understand the basics, let's dive into the core principles that govern ${lessonTitle}. These principles are the building blocks that everything else is built upon.\n\nUnderstanding these principles will help you recognize patterns and make connections as you learn more advanced concepts.`,
-          keyPoints: [
-            'Primary principles and how they work',
-            'The relationship between different concepts',
-            'Common patterns you should recognize',
-            'How these principles apply in practice'
-          ],
-          example: `Consider how these principles work together like pieces of a puzzle. Each principle supports and reinforces the others, creating a comprehensive understanding of ${lessonTitle}.`,
-          question: {
-            text: 'How do the core principles work together?',
-            options: [
-              'They operate completely independently',
-              'They work together like pieces of a puzzle, supporting each other',
-              'Only one principle matters at a time',
-              'They often contradict each other'
-            ],
-            correctAnswer: 1,
-            explanation: 'Core principles in any subject work synergistically, where understanding one principle helps reinforce and deepen understanding of the others.'
-          },
-          completed: false
-        },
-        {
-          id: '3',
-          title: 'Practical Applications',
-          content: `Let's explore how ${lessonTitle} applies in real-world scenarios. This is where theory meets practice, and you'll see how the concepts you've learned actually work in everyday situations.\n\nUnderstanding practical applications helps solidify your knowledge and shows you the value of what you're learning.`,
-          keyPoints: [
-            'Real-world use cases and scenarios',
-            'Common challenges and how to overcome them',
-            'Best practices from industry experts',
-            'Tools and resources for practical application'
-          ],
-          example: `In professional settings, ${lessonTitle} might be applied when solving specific problems or making important decisions. The principles you've learned provide a framework for approaching these challenges systematically.`,
-          question: {
-            text: 'Why is understanding practical applications important?',
-            options: [
-              'It makes the learning more interesting',
-              'It helps solidify knowledge and shows real value',
-              'It\'s required for passing tests',
-              'It impresses other people'
-            ],
-            correctAnswer: 1,
-            explanation: 'Practical applications bridge the gap between theoretical knowledge and real-world utility, making learning more meaningful and memorable.'
+            correctAnswer: 3,
+            explanation: 'If a lesson is not found, you can try a different lesson, wait for content to be added, or contact support.',
           },
           completed: false
         }
-      ];
-
-      setSegments(mockSegments);
-    } catch (error) {
-      console.error('Error generating lesson content:', error);
-      Alert.alert('Error', 'Failed to generate lesson content');
+      ]);
+      Alert.alert('Error', 'Failed to generate lesson content. See debug info below.');
     } finally {
       setLoading(false);
     }
@@ -162,14 +195,10 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
     // Award XP for completing a segment
     await learningService.awardXP(user.id, 15);
     
-    // Track in profile service
-    await profileService.trackLessonCompletion(user.id, duration, completedUnderTarget);
-
     // Update progress
     const progress = Math.round(((currentSegment + 1) / segments.length) * 100);
     await learningService.updateProgress(user.id, lessonTitle, progress);
 
-    setShowQuestion(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
     setAttempts(0);
@@ -179,13 +208,7 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
       setStartTime(new Date()); // Reset timer for next segment
     } else {
       // Lesson completed
-      const newAchievements = await profileService.checkAchievements(user.id);
-      
       let alertMessage = `Congratulations! You've completed "${lessonTitle}". You earned ${segments.length * 15} XP!`;
-      
-      if (newAchievements.length > 0) {
-        alertMessage += `\n\nNew achievements unlocked: ${newAchievements.map(a => a.title).join(', ')}!`;
-      }
       
       Alert.alert(
         'Lesson Complete! 🎉',
@@ -255,91 +278,70 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
                 <>
                   {/* Segment Title */}
                   <Text style={styles.segmentTitle}>{currentSegmentData.title}</Text>
-
-                  {/* Content */}
-                  <View style={styles.contentCard}>
-                    <Text style={styles.contentText}>{currentSegmentData.content}</Text>
-                  </View>
-
-                  {/* Key Points */}
-                  <View style={styles.keyPointsCard}>
-                    <Text style={styles.sectionTitle}>Key Points</Text>
-                    {currentSegmentData.keyPoints.map((point, index) => (
-                      <View key={index} style={styles.keyPoint}>
-                        <View style={styles.bullet} />
-                        <Text style={styles.keyPointText}>{point}</Text>
-                      </View>
-                    ))}
-                  </View>
-
-                  {/* Example */}
-                  <View style={styles.exampleCard}>
-                    <Text style={styles.sectionTitle}>Example</Text>
-                    <Text style={styles.exampleText}>{currentSegmentData.example}</Text>
-                  </View>
-
-                  {/* Interactive Question */}
-                  {!showQuestion ? (
-                    <TouchableOpacity 
-                      style={styles.startQuestionButton}
-                      onPress={() => setShowQuestion(true)}
-                    >
-                      <Play size={20} color="#fff" />
-                      <Text style={styles.startQuestionText}>Test Your Understanding</Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <View style={styles.questionCard}>
-                      <View style={styles.questionHeader}>
-                        <Text style={styles.sectionTitle}>Check Your Understanding</Text>
-                        {attempts > 0 && (
-                          <TouchableOpacity onPress={resetQuestion} style={styles.resetButton}>
-                            <RotateCcw size={16} color="#21a1ff" />
-                          </TouchableOpacity>
-                        )}
-                      </View>
-                      
-                      <Text style={styles.questionText}>{currentSegmentData.question.text}</Text>
-                      
-                      {currentSegmentData.question.options.map((option, index) => (
-                        <TouchableOpacity
-                          key={index}
-                          style={[
-                            styles.optionButton,
-                            selectedAnswer === index && styles.selectedOption,
-                            showExplanation && index === currentSegmentData.question.correctAnswer && styles.correctOption
-                          ]}
-                          onPress={() => handleAnswerSelect(index)}
-                          disabled={showExplanation}
-                        >
-                          <Text style={[
-                            styles.optionText,
-                            selectedAnswer === index && styles.selectedOptionText,
-                            showExplanation && index === currentSegmentData.question.correctAnswer && styles.correctOptionText
-                          ]}>
-                            {option}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-
-                      {showExplanation && (
-                        <View style={styles.explanationCard}>
-                          <Text style={styles.explanationTitle}>Explanation</Text>
-                          <Text style={styles.explanationText}>
-                            {currentSegmentData.question.explanation}
-                          </Text>
-                          <TouchableOpacity 
-                            style={styles.continueButton}
-                            onPress={handleSegmentComplete}
-                          >
-                            <CheckCircle size={20} color="#fff" />
-                            <Text style={styles.continueButtonText}>
-                              {currentSegment < segments.length - 1 ? 'Continue to Next Segment' : 'Complete Lesson'}
-                            </Text>
-                          </TouchableOpacity>
+                  {/* Content Boxes */}
+                  {Array.isArray((currentSegmentData as any).contentBoxes)
+                    ? (currentSegmentData as any).contentBoxes.map((box: string, idx: number) => (
+                        <View key={idx} style={styles.contentCard}>
+                          <Text style={styles.contentText}>{box}</Text>
                         </View>
+                      ))
+                    : (
+                      <View style={styles.contentCard}>
+                        <Text style={styles.contentText}>{currentSegmentData.content}</Text>
+                      </View>
+                    )}
+                  {/* Interactive Question */}
+                  <View style={styles.questionCard}>
+                    <View style={styles.questionHeader}>
+                      <Text style={styles.sectionTitle}>Check Your Understanding</Text>
+                      {attempts > 0 && (
+                        <TouchableOpacity onPress={resetQuestion} style={styles.resetButton}>
+                          <RotateCcw size={16} color="#21a1ff" />
+                        </TouchableOpacity>
                       )}
                     </View>
-                  )}
+                    
+                    <Text style={styles.questionText}>{currentSegmentData.question.text}</Text>
+                    
+                    {currentSegmentData.question.options.map((option, index) => (
+                      <TouchableOpacity
+                        key={index}
+                        style={[
+                          styles.optionButton,
+                          selectedAnswer === index && styles.selectedOption,
+                          showExplanation && index === currentSegmentData.question.correctAnswer && styles.correctOption
+                        ]}
+                        onPress={() => handleAnswerSelect(index)}
+                        disabled={showExplanation}
+                      >
+                        <Text style={[
+                          styles.optionText,
+                          selectedAnswer === index && styles.selectedOptionText,
+                          showExplanation && index === currentSegmentData.question.correctAnswer && styles.correctOptionText
+                        ]}>
+                          {option}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+
+                    {showExplanation && (
+                      <View style={styles.explanationCard}>
+                        <Text style={styles.explanationTitle}>Explanation</Text>
+                        <Text style={styles.explanationText}>
+                          {currentSegmentData.question.explanation}
+                        </Text>
+                        <TouchableOpacity 
+                          style={styles.continueButton}
+                          onPress={handleSegmentComplete}
+                        >
+                          <CheckCircle size={20} color="#fff" />
+                          <Text style={styles.continueButtonText}>
+                            {currentSegment < segments.length - 1 ? 'Continue to Next Segment' : 'Complete Lesson'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
                 </>
               )}
             </ScrollView>
@@ -394,6 +396,14 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
           )}
         </LinearGradient>
       </SafeAreaView>
+      {/* Debug Panel */}
+      {debugInfo.error || debugInfo.aiResponse ? (
+        <View style={{ backgroundColor: '#222', padding: 10, margin: 10, borderRadius: 8 }}>
+          <Text style={{ color: '#fff', fontWeight: 'bold' }}>Debug Info</Text>
+          {debugInfo.error && <Text style={{ color: '#ff6b6b' }}>Error: {debugInfo.error}</Text>}
+          {debugInfo.aiResponse && <Text style={{ color: '#a0e7e5', marginTop: 8 }}>AI Response: {debugInfo.aiResponse.slice(0, 500)}{debugInfo.aiResponse.length > 500 ? '...' : ''}</Text>}
+        </View>
+      ) : null}
     </Modal>
   );
 }
@@ -470,66 +480,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 24,
     color: '#233e6a',
-  },
-  keyPointsCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#233e6a',
-    marginBottom: 12,
-  },
-  keyPoint: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginBottom: 8,
-  },
-  bullet: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#21a1ff',
-    marginTop: 8,
-    marginRight: 12,
-  },
-  keyPointText: {
-    flex: 1,
-    fontSize: 14,
-    lineHeight: 20,
-    color: '#233e6a',
-  },
-  exampleCard: {
-    backgroundColor: 'rgba(33, 161, 255, 0.1)',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-    borderLeftWidth: 4,
-    borderLeftColor: '#21a1ff',
-  },
-  exampleText: {
-    fontSize: 14,
-    lineHeight: 20,
-    color: '#233e6a',
-    fontStyle: 'italic',
-  },
-  startQuestionButton: {
-    backgroundColor: '#21a1ff',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 20,
-  },
-  startQuestionText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
   },
   questionCard: {
     backgroundColor: 'rgba(255, 255, 255, 0.95)',
@@ -640,6 +590,8 @@ const styles = StyleSheet.create({
   segmentIndicators: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
   },
   indicator: {
     width: 8,
@@ -655,6 +607,17 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   completedIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
     backgroundColor: '#4ade80',
+    marginHorizontal: 2,
+  },
+  // Add sectionTitle style
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#233e6a',
+    marginBottom: 8,
   },
 });

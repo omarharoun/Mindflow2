@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { BookOpen, Play, Users, Lightbulb, PenTool, ChevronDown, ChevronRight, CircleCheck as CheckCircle, Circle, ChartBar as BarChart3 } from 'lucide-react-native';
+import { BookOpen, Play, Users, Lightbulb, PenTool, ChevronDown, ChevronRight, CircleCheck as CheckCircle, Circle, ChartBar as BarChart3, Trash2, Undo2 } from 'lucide-react-native';
 import { authManager } from '@/lib/auth';
 import { learningService } from '@/lib/learning';
 import LessonViewer from '@/components/LessonViewer';
@@ -23,6 +23,7 @@ interface Topic {
   lessons: Lesson[];
   progress: number;
   expanded: boolean;
+  deleted?: boolean;
 }
 
 interface Lesson {
@@ -247,7 +248,8 @@ const learningTopics: Topic[] = [
 ];
 
 export default function LearnScreen() {
-  const [topics, setTopics] = useState<Topic[]>(learningTopics);
+  const initializeTopics = (topics: Topic[]) => topics.map(t => ({ ...t, deleted: t.deleted ?? false }));
+  const [topics, setTopics] = useState<Topic[]>(initializeTopics(learningTopics));
   const [user, setUser] = useState(authManager.getUser());
   const [userProgress, setUserProgress] = useState<any[]>([]);
   const [showLessonViewer, setShowLessonViewer] = useState(false);
@@ -324,6 +326,24 @@ export default function LearnScreen() {
     setShowLessonViewer(true);
   };
 
+  const handleDeleteTopic = async (topicId: string) => {
+    if (!user) return;
+    setTopics(prevTopics => prevTopics.map(topic =>
+      topic.id === topicId ? { ...topic, deleted: true } : topic
+    ));
+    // Soft delete in backend
+    await learningService.removeTopicProgress(user.id, topicId, true); // true = deleted
+  };
+
+  const handleRestoreTopic = async (topicId: string) => {
+    if (!user) return;
+    setTopics(prevTopics => prevTopics.map(topic =>
+      topic.id === topicId ? { ...topic, deleted: false } : topic
+    ));
+    // Restore in backend
+    await learningService.removeTopicProgress(user.id, topicId, false); // false = not deleted
+  };
+
   const getDifficultyColor = (difficulty: string) => {
     switch (difficulty) {
       case 'Beginner': return '#4ade80';
@@ -332,6 +352,9 @@ export default function LearnScreen() {
       default: return '#666';
     }
   };
+
+  const activeTopics = topics.filter(topic => !topic.deleted);
+  const deletedTopics = topics.filter(topic => topic.deleted);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -361,44 +384,51 @@ export default function LearnScreen() {
           {/* Learning Topics */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Learning Topics</Text>
-            {topics.map((topic) => {
+            {activeTopics.map((topic) => {
               const IconComponent = topic.icon;
               return (
                 <View key={topic.id} style={styles.topicContainer}>
                   {/* Topic Header */}
-                  <TouchableOpacity
-                    style={styles.topicHeader}
-                    onPress={() => toggleTopicExpansion(topic.id)}
-                  >
-                    <View style={[styles.topicIconContainer, { backgroundColor: topic.color }]}>
-                      <IconComponent size={24} color="#fff" />
-                    </View>
-                    <View style={styles.topicContent}>
-                      <Text style={styles.topicTitle}>{topic.title}</Text>
-                      <Text style={styles.topicDescription}>{topic.description}</Text>
-                      <View style={styles.topicProgressContainer}>
-                        <View style={styles.progressBar}>
-                          <View 
-                            style={[
-                              styles.progressFill, 
-                              { width: `${topic.progress}%`, backgroundColor: topic.color }
-                            ]} 
-                          />
-                        </View>
-                        <Text style={styles.progressText}>
-                          {Math.round(topic.progress)}% complete
-                        </Text>
+                  <View style={styles.topicHeaderRow}>
+                    <TouchableOpacity
+                      style={styles.topicHeader}
+                      onPress={() => toggleTopicExpansion(topic.id)}
+                    >
+                      <View style={[styles.topicIconContainer, { backgroundColor: topic.color }]}> 
+                        <IconComponent size={24} color="#fff" />
                       </View>
-                    </View>
-                    <View style={styles.expandIcon}>
-                      {topic.expanded ? (
-                        <ChevronDown size={20} color="#21a1ff" />
-                      ) : (
-                        <ChevronRight size={20} color="#21a1ff" />
-                      )}
-                    </View>
-                  </TouchableOpacity>
-
+                      <View style={styles.topicContent}>
+                        <Text style={styles.topicTitle}>{topic.title}</Text>
+                        <Text style={styles.topicDescription}>{topic.description}</Text>
+                        <View style={styles.topicProgressContainer}>
+                          <View style={styles.progressBar}>
+                            <View 
+                              style={[
+                                styles.progressFill, 
+                                { width: `${topic.progress}%`, backgroundColor: topic.color }
+                              ]} 
+                            />
+                          </View>
+                          <Text style={styles.progressText}>
+                            {Math.round(topic.progress)}% complete
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={styles.expandIcon}>
+                        {topic.expanded ? (
+                          <ChevronDown size={20} color="#21a1ff" />
+                        ) : (
+                          <ChevronRight size={20} color="#21a1ff" />
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.closeButton}
+                      onPress={() => handleDeleteTopic(topic.id)}
+                    >
+                      <Text style={styles.closeButtonText}>×</Text>
+                    </TouchableOpacity>
+                  </View>
                   {/* Lessons List */}
                   {topic.expanded && (
                     <View style={styles.lessonsContainer}>
@@ -456,6 +486,35 @@ export default function LearnScreen() {
               );
             })}
           </View>
+          {deletedTopics.length > 0 && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Recently Deleted</Text>
+              {deletedTopics.map((topic) => {
+                const IconComponent = topic.icon;
+                return (
+                  <View key={topic.id} style={styles.topicContainer}>
+                    <View style={styles.topicHeaderRow}>
+                      <View style={styles.topicHeader}>
+                        <View style={[styles.topicIconContainer, { backgroundColor: topic.color }]}> 
+                          <IconComponent size={24} color="#fff" />
+                        </View>
+                        <View style={styles.topicContent}>
+                          <Text style={styles.topicTitle}>{topic.title}</Text>
+                          <Text style={styles.topicDescription}>{topic.description}</Text>
+                        </View>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.restoreButton}
+                        onPress={() => handleRestoreTopic(topic.id)}
+                      >
+                        <Undo2 size={24} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          )}
         </ScrollView>
         
         <LessonViewer
@@ -530,10 +589,15 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
   },
-  topicHeader: {
-    padding: 20,
+  topicHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  topicHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 20,
   },
   topicIconContainer: {
     width: 48,
@@ -580,6 +644,16 @@ const styles = StyleSheet.create({
   },
   expandIcon: {
     marginLeft: 12,
+  },
+  closeButton: {
+    padding: 12,
+    alignSelf: 'flex-start',
+  },
+  closeButtonText: {
+    fontSize: 24,
+    color: '#ef4444',
+    fontWeight: 'bold',
+    lineHeight: 24,
   },
   lessonsContainer: {
     paddingHorizontal: 20,
@@ -666,5 +740,12 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: '#666',
     fontWeight: '600',
+  },
+  restoreButton: {
+    padding: 12,
+    alignSelf: 'flex-start',
+    backgroundColor: '#4ade80',
+    borderRadius: 8,
+    marginLeft: 8,
   },
 });

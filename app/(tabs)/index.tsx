@@ -375,7 +375,7 @@ export default function HomeScreen() {
             {/* Learning Paths */}
             {submitted && generatedPaths.length > 0 && (
               <View style={styles.learningSection}>
-                <Text style={styles.sectionTitle}>AI-Generated Learning Path</Text>
+                <Text style={styles.sectionTitle}>Generated Learning Path</Text>
                 {generatedPaths.map((path, idx) => (
                   <TouchableOpacity
                     key={idx}
