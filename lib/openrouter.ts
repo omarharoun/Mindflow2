@@ -1,4 +1,4 @@
-const OPENROUTER_API_KEY = process.env.EXPO_PUBLIC_OPENROUTER_API_KEY;
+const OPENROUTER_API_KEY = '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';
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
 if (!OPENROUTER_API_KEY) {
@@ -39,6 +39,8 @@ export class OpenRouterAPI {
     messages: ChatMessage[],
     model: string = 'anthropic/claude-3.5-sonnet'
   ): Promise<string> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000); // 20s timeout
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -54,13 +56,11 @@ export class OpenRouterAPI {
             {
               role: 'system',
               content: `You are Nova, an AI learning assistant for MindFlow, a mobile learning platform. You help users learn new topics by:
-              
               1. Breaking down complex concepts into digestible parts
               2. Providing clear explanations with examples
               3. Suggesting learning paths and resources
               4. Encouraging users and tracking their progress
               5. Adapting to different learning styles
-              
               Keep responses concise but helpful, and always maintain an encouraging, friendly tone. Focus on practical learning advice and actionable next steps.`
             },
             ...messages
@@ -71,20 +71,22 @@ export class OpenRouterAPI {
           frequency_penalty: 0,
           presence_penalty: 0,
         }),
+        signal: controller.signal,
       });
-
+      clearTimeout(timeout);
       if (!response.ok) {
         throw new Error(`OpenRouter API error: ${response.status}`);
       }
-
       const data: OpenRouterResponse = await response.json();
-      
       if (!data.choices || data.choices.length === 0) {
         throw new Error('No response from OpenRouter API');
       }
-
       return data.choices[0].message.content;
     } catch (error) {
+      clearTimeout(timeout);
+      if (error.name === 'AbortError') {
+        throw new Error('Request timed out. The AI service is taking too long to respond. Please try again later.');
+      }
       console.error('OpenRouter API error:', error);
       throw new Error('Failed to generate AI response');
     }
@@ -118,3 +120,7 @@ export class OpenRouterAPI {
 }
 
 export const openRouterAPI = new OpenRouterAPI();
+
+export async function generateFreeModelResponse(messages: ChatMessage[]): Promise<string> {
+  return openRouterAPI.generateResponse(messages, "deepseek/deepseek-r1-0528:free");
+}

@@ -11,9 +11,9 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { X, ChevronLeft, ChevronRight, CircleCheck as CheckCircle, Circle, Play, Pause, RotateCcw } from 'lucide-react-native';
-import { authManager } from '@/lib/auth';
-import { learningService } from '@/lib/learning';
-import { openRouterAPI } from '@/lib/openrouter';
+import { authManager } from '../lib/auth';
+import { learningService } from '../lib/learning';
+import { openRouterAPI, generateFreeModelResponse } from '../lib/openrouter';
 
 interface LessonSegment {
   id: string;
@@ -46,6 +46,68 @@ function splitIntoBoxes(text: string, maxWords = 144, maxBoxes = 5): string[] {
   return boxes;
 }
 
+// Utility to extract the largest valid JSON array from a string (even if truncated)
+function extractLargestValidJsonArray(text: string): any[] | null {
+  const start = text.indexOf('[');
+  if (start === -1) return null;
+  let end = text.length;
+  while (end > start) {
+    try {
+      return JSON.parse(text.slice(start, end));
+    } catch {
+      end--;
+    }
+  }
+  return null;
+}
+
+// Utility to extract all valid lesson segment objects from a string
+function extractAllValidSegments(text: string): any[] {
+  const objects = [];
+  const regex = /{[^}]*}/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      objects.push(JSON.parse(match[0]));
+    } catch {
+      // skip invalid objects
+    }
+  }
+  return objects;
+}
+
+// Utility to extract the first JSON array or object from a string, stripping code blocks and extra text
+function extractFirstJsonBlock(text: string): string | null {
+  // Remove code block wrappers
+  let cleaned = text.replace(/```json|```/gi, '').trim();
+  // Try to find the first JSON array
+  const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+  if (arrayMatch) return arrayMatch[0];
+  // Try to find the first JSON object
+  const objectMatch = cleaned.match(/{[\s\S]*}/);
+  if (objectMatch) return objectMatch[0];
+  return null;
+}
+
+// Utility to extract JSON between <output>...</output> tags
+function extractJsonBetweenTags(text: string): string | null {
+  const match = text.match(/<output>([\s\S]*?)<\/output>/i);
+  return match ? match[1].trim() : null;
+}
+
+// Simple JSON repair: closes unclosed brackets/braces (best effort)
+function simpleJsonRepair(jsonStr: string): string {
+  let repaired = jsonStr;
+  // Add missing closing brackets/braces
+  const openBraces = (repaired.match(/{/g) || []).length;
+  const closeBraces = (repaired.match(/}/g) || []).length;
+  const openBrackets = (repaired.match(/\[/g) || []).length;
+  const closeBrackets = (repaired.match(/\]/g) || []).length;
+  repaired += '}'.repeat(Math.max(0, openBraces - closeBraces));
+  repaired += ']'.repeat(Math.max(0, openBrackets - closeBrackets));
+  return repaired;
+}
+
 export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId }: LessonViewerProps) {
   const [segments, setSegments] = useState<LessonSegment[]>([]);
   const [currentSegment, setCurrentSegment] = useState(0);
@@ -55,7 +117,7 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
   const [attempts, setAttempts] = useState(0);
   const [user, setUser] = useState(authManager.getUser());
   const [startTime, setStartTime] = useState<Date | null>(null);
-  const [debugInfo, setDebugInfo] = useState<{error?: string, aiResponse?: string}>({});
+  const [debugInfo, setDebugInfo] = useState<{error?: string, aiResponse?: string, rawJsonExtracted?: string}>({});
 
   useEffect(() => {
     const unsubscribe = authManager.subscribe(setUser);
@@ -81,37 +143,45 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
         return;
       }
       // 2. If not found, generate with AI
-      const aiPrompt = `Create a detailed, multi-section lesson for the topic: "${lessonTitle}". \nReturn a JSON array where each item is an object with:\n- id (string, unique for each segment)\n- title (string, section title)\n- content (string, main explanation)\n- keyPoints (array of 3-5 bullet points)\n- question (object with: text, options (array), correctAnswer (index), explanation)\n- completed (boolean, default false)\nExample:\n[\n  {\"id\": \"1\", \"title\": \"Intro\", \"content\": \"...\", \"keyPoints\": [\"...\"], \"question\": {\"text\": \"...\", \"options\": [\"...\"], \"correctAnswer\": 0, \"explanation\": \"...\"}, \"completed\": false},\n  ...\n]\nKeep the lesson practical, clear, and engaging.`;
+      const aiPrompt = `Return a single lesson section as a JSON object, not in an array, and enclose it in <output>...</output> tags. Keep the content under 2 sentences. Example:\n<output>\n{\n  \"id\": \"1\",\n  \"title\": \"What is a Supernova?\",\n  \"content\": \"A supernova is the explosive death of a massive star.\",\n  \"keyPoints\": [\"Explosive death of a star\"],\n  \"question\": {\n    \"text\": \"What is a supernova?\",\n    \"options\": [\"A new star\", \"A star exploding\", \"A planet\", \"A comet\"],\n    \"correctAnswer\": 1,\n    \"explanation\": \"A supernova is a star exploding.\"\n  },\n  \"completed\": false\n}\n</output>\nTopic: ${lessonTitle}`;
       let aiResponse = '';
       let segments: LessonSegment[] = [];
       try {
-        aiResponse = await openRouterAPI.generateResponse([
+        aiResponse = await generateFreeModelResponse([
           { role: 'user', content: aiPrompt }
         ]);
-        setDebugInfo({ aiResponse });
         let parsed;
-        try {
-          parsed = JSON.parse(aiResponse);
-        } catch (err) {
-          // Try to recover the largest valid JSON array from a truncated response
-          const arrayMatch = aiResponse.match(/\[([\s\S]*)\]/);
-          if (arrayMatch) {
-            const partial = '[' + arrayMatch[1];
+        let rawJsonExtracted = '';
+        // Try extracting JSON between <output> tags
+        const jsonBetweenTags = extractJsonBetweenTags(aiResponse);
+        if (jsonBetweenTags) {
+          rawJsonExtracted = jsonBetweenTags;
+          try {
+            parsed = JSON.parse(jsonBetweenTags);
+          } catch (e) {
+            // Try simple repair and parse again
             try {
-              parsed = JSON.parse(partial + ']');
-            } catch (e2) {
-              throw new Error('AI response is not valid JSON, even after recovery.');
+              parsed = JSON.parse(simpleJsonRepair(jsonBetweenTags));
+            } catch {
+              parsed = null;
             }
-          } else {
-            throw new Error('AI response is not valid JSON and no array found.');
           }
         }
-        if (Array.isArray(parsed)) {
-          segments = parsed;
-        } else if (parsed.lesson && Array.isArray(parsed.lesson)) {
-          segments = parsed.lesson;
+        // Fallback to previous extraction if needed
+        if (!parsed) {
+          const jsonBlock = extractFirstJsonBlock(aiResponse);
+          if (jsonBlock) rawJsonExtracted = jsonBlock;
+          if (!jsonBlock) throw new Error('No JSON found in AI response');
+          parsed = JSON.parse(jsonBlock);
+        }
+        if (parsed) {
+          if (Array.isArray(parsed)) {
+            segments = parsed;
+          } else {
+            segments = [parsed];
+          }
         } else {
-          throw new Error('AI did not return a lesson array');
+          throw new Error('AI did not return a lesson object');
         }
       } catch (err) {
         setDebugInfo({ error: String(err), aiResponse });
@@ -301,26 +371,23 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
                       )}
                     </View>
                     
-                    <Text style={styles.questionText}>{currentSegmentData.question.text}</Text>
+                    {/* Defensive check for question */}
+                    <Text style={styles.questionText}>
+                      {currentSegmentData.question?.text || "No question available."}
+                    </Text>
                     
-                    {currentSegmentData.question.options.map((option, index) => (
+                    {currentSegmentData.question?.options?.map((option, index) => (
                       <TouchableOpacity
                         key={index}
                         style={[
                           styles.optionButton,
                           selectedAnswer === index && styles.selectedOption,
-                          showExplanation && index === currentSegmentData.question.correctAnswer && styles.correctOption
+                          showExplanation && index === currentSegmentData.question?.correctAnswer && styles.correctOption
                         ]}
                         onPress={() => handleAnswerSelect(index)}
                         disabled={showExplanation}
                       >
-                        <Text style={[
-                          styles.optionText,
-                          selectedAnswer === index && styles.selectedOptionText,
-                          showExplanation && index === currentSegmentData.question.correctAnswer && styles.correctOptionText
-                        ]}>
-                          {option}
-                        </Text>
+                        <Text style={styles.optionText}>{option}</Text>
                       </TouchableOpacity>
                     ))}
 
@@ -328,7 +395,7 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
                       <View style={styles.explanationCard}>
                         <Text style={styles.explanationTitle}>Explanation</Text>
                         <Text style={styles.explanationText}>
-                          {currentSegmentData.question.explanation}
+                          {currentSegmentData.question?.explanation}
                         </Text>
                         <TouchableOpacity 
                           style={styles.continueButton}
@@ -396,14 +463,25 @@ export default function LessonViewer({ isVisible, onClose, lessonTitle, lessonId
           )}
         </LinearGradient>
       </SafeAreaView>
-      {/* Debug Panel */}
-      {debugInfo.error || debugInfo.aiResponse ? (
+      {/* Debug Info Section */}
+      {(debugInfo.error || debugInfo.aiResponse) && (
         <View style={{ backgroundColor: '#222', padding: 10, margin: 10, borderRadius: 8 }}>
-          <Text style={{ color: '#fff', fontWeight: 'bold' }}>Debug Info</Text>
-          {debugInfo.error && <Text style={{ color: '#ff6b6b' }}>Error: {debugInfo.error}</Text>}
-          {debugInfo.aiResponse && <Text style={{ color: '#a0e7e5', marginTop: 8 }}>AI Response: {debugInfo.aiResponse.slice(0, 500)}{debugInfo.aiResponse.length > 500 ? '...' : ''}</Text>}
+          <Text style={{ color: '#fff', fontWeight: 'bold' }}>Debug Info:</Text>
+          {debugInfo.error && (
+            <Text style={{ color: '#ff5555' }}>Error: {debugInfo.error}</Text>
+          )}
+          {debugInfo.aiResponse && (
+            <ScrollView style={{ maxHeight: 200 }}>
+              <Text style={{ color: '#fff' }}>AI Response: {debugInfo.aiResponse}</Text>
+            </ScrollView>
+          )}
+          {debugInfo.rawJsonExtracted && (
+            <ScrollView style={{ maxHeight: 200 }}>
+              <Text style={{ color: '#a0e7e5' }}>Raw JSON Extracted: {debugInfo.rawJsonExtracted}</Text>
+            </ScrollView>
+          )}
         </View>
-      ) : null}
+      )}
     </Modal>
   );
 }

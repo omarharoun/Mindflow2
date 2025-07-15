@@ -82,7 +82,8 @@ class LearningServiceImpl implements LearningService {
       if (setDebugInfo) setDebugInfo({ aiResponse });
       let titles: string[] = [];
       try {
-        const parsed = JSON.parse(aiResponse);
+        const cleanedResponse = stripCodeBlock(aiResponse);
+        const parsed = JSON.parse(cleanedResponse);
         if (Array.isArray(parsed) && parsed.every(t => typeof t === 'string')) {
           titles = parsed;
         } else if (parsed.path && Array.isArray(parsed.path)) {
@@ -91,15 +92,40 @@ class LearningServiceImpl implements LearningService {
           throw new Error('AI did not return a valid array of titles');
         }
       } catch (err) {
-        if (setDebugInfo) setDebugInfo({ error: String(err), aiResponse });
-        // fallback
-        titles = [
-          `Introduction to ${topic}`,
-          `Core Concepts of ${topic}`,
-          `Applications of ${topic}`,
-          `Challenges in ${topic}`,
-          `Future of ${topic}`
-        ];
+        // Try to extract the largest valid JSON array from a truncated or verbose response
+        const cleanedResponse = stripCodeBlock(aiResponse);
+        const extracted = extractLargestValidJsonArray(cleanedResponse);
+        if (extracted && Array.isArray(extracted) && extracted.every(t => typeof t === 'string')) {
+          titles = extracted;
+        } else {
+          // Fallback: extract all complete objects as lesson titles (if possible)
+          const objects = extractAllCompleteObjects(cleanedResponse);
+          if (objects.length > 0 && objects.every(obj => typeof obj.title === 'string')) {
+            titles = objects.map(obj => obj.title);
+          } else {
+            // Final fallback: try NDJSON extraction
+            const ndjsonObjects = extractNDJSON(cleanedResponse);
+            if (ndjsonObjects.length > 0 && ndjsonObjects.every(obj => typeof obj.title === 'string')) {
+              titles = ndjsonObjects.map(obj => obj.title);
+            } else {
+              // Last resort: try to extract a single object
+              const singleObj = extractSingleObject(cleanedResponse);
+              if (singleObj && typeof singleObj.title === 'string') {
+                titles = [singleObj.title];
+              } else {
+                if (setDebugInfo) setDebugInfo({ error: String(err), aiResponse });
+                // fallback
+                titles = [
+                  `Introduction to ${topic}`,
+                  `Core Concepts of ${topic}`,
+                  `Applications of ${topic}`,
+                  `Challenges in ${topic}`,
+                  `Future of ${topic}`
+                ];
+              }
+            }
+          }
+        }
       }
       return titles;
     } catch (error) {
@@ -320,6 +346,70 @@ class LearningServiceImpl implements LearningService {
       return { success: false, error: 'Failed to save lesson' };
     }
   }
+}
+
+// Utility to extract the largest valid JSON array from a string (even if truncated)
+function extractLargestValidJsonArray(text: string): any[] | null {
+  const start = text.indexOf('[');
+  if (start === -1) return null;
+  let end = text.length;
+  while (end > start) {
+    try {
+      return JSON.parse(text.slice(start, end));
+    } catch {
+      end--;
+    }
+  }
+  return null;
+}
+
+// Utility to extract all complete JSON objects from a truncated array
+function extractAllCompleteObjects(text: string): any[] {
+  const objects = [];
+  const regex = /{[^}]*}/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      objects.push(JSON.parse(match[0]));
+    } catch {
+      // skip invalid objects
+    }
+  }
+  return objects;
+}
+
+// Utility to extract NDJSON (newline-delimited JSON objects)
+function extractNDJSON(text: string): any[] {
+  return text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('{') && line.endsWith('}'))
+    .map(line => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(obj => obj !== null);
+}
+
+// Utility to extract a single JSON object from a string
+function extractSingleObject(text: string): any | null {
+  const match = text.match(/{[\s\S]*}/);
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+// Utility to strip code block wrappers from AI response
+function stripCodeBlock(text: string): string {
+  return text.replace(/^```json\s*|```$/gmi, '').trim();
 }
 
 export const learningService = new LearningServiceImpl();
